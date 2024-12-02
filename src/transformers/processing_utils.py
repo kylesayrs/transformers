@@ -532,7 +532,7 @@ class ProcessorMixin(PushToHubMixin):
         processor_dict = self.to_dict()
         # Save `chat_template` in its own file. We can't get it from `processor_dict` as we popped it in `to_dict`
         # to avoid serializing chat template in json config file. So let's get it from `self` directly
-        if self.chat_template is not None:
+        if getattr(self, "chat_template", None) is not None:
             if kwargs.get("save_raw_chat_template", False):
                 with open(output_raw_chat_template_file, "w", encoding="utf-8") as writer:
                     writer.write(self.chat_template)
@@ -1120,7 +1120,7 @@ class ProcessorMixin(PushToHubMixin):
         """
 
         if chat_template is None:
-            if self.chat_template is not None:
+            if getattr(self, "chat_template", None) is not None:
                 chat_template = self.chat_template
             else:
                 raise ValueError(
