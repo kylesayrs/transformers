@@ -314,19 +314,13 @@ class FP8Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        #self.register_buffer("weight", torch.empty(out_features, in_features, dtype=FP8Linear.dtype, device=device), persistent=False)
         self.register_buffer("weight", torch.empty(out_features, in_features, dtype=FP8Linear.dtype, device=device))
-        #self.register_parameter("weight", torch.nn.Parameter(torch.empty(out_features, in_features, dtype=FP8Linear.dtype, device=device)))
 
         scale_out_features = (out_features + block_size[0] - 1) // block_size[0]
         scale_in_features = (in_features + block_size[1] - 1) // block_size[1]
-        # self.register_buffer(
-        #     "weight_scale_inv", torch.empty(scale_out_features, scale_in_features, dtype=torch.float32, device=device), persistent=False
-        # )
         self.register_buffer(
             "weight_scale_inv", torch.empty(scale_out_features, scale_in_features, dtype=torch.float32, device=device)
         )
-        #self.register_parameter("weight_scale_inv", torch.nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32, device=device)))
 
         self.block_size = block_size
 
@@ -474,96 +468,45 @@ def _dequantize_weight_blockwise_broadcast(weight: torch.Tensor, weight_scale_in
 
     return weight
 
-import gc
-import sys
-#gc.set_debug(gc.DEBUG_LEAK)
-
-def all_your_delete_are_belong_to_us(*args):
-    breakpoint()
-    pass
 
 import tqdm
 def _dequantize_fp8_finegrained(
     model: nn.Module,
-    current_key_name: List[str],
     device: torch.device,
+    dtype: torch.dtype,
     progress: Optional[tqdm.tqdm] = None
 ) -> nn.Module:
     """
     Dequantizes the FP8 layers in the given model/module by replacing them with standard torch.nn.Linear layers
     Args:
         model (torch.nn.Module): The module containing FP8Linear layers to be dequantized.
-        current_key_name (list, optional): A list to keep track of the current module names during recursion. Defaults to None.
     Returns:
         torch.nn.Module: The module with FP8Linear layers replaced by torch.nn.Linear layers
     """
-    for name in list(model._modules.keys()):
-        #current_key_name.append(name)
+    for name, module in model.named_children():
+        if isinstance(module, FP8Linear):
+            in_features = module.in_features
+            out_features = module.out_features
+            module_device = module.weight.device
 
-        #if isinstance(model._modules[name], FP8Linear):
-        if isinstance(model._modules[name], nn.Linear):
-            in_features = model._modules[name].in_features
-            out_features = model._modules[name].out_features
-            # original_device = model._modules[name].weight.device
+            weight = model._modules[name].weight
+            weight_scale_inv = model._modules[name].weight_scale_inv
 
-            # import gc
-            # import sys
-            # print(len(gc.get_referrers(model._modules[name])))
-            # print(sys.getrefcount(model._modules[name]))
-            # print(len(gc.get_referrers(model._modules[name].weight)))
-            # print(sys.getrefcount(model._modules[name].weight))
+            new_linear = nn.Linear(
+                in_features,
+                out_features,
+                bias=module.bias is not None,
+                device=module_device,
+                dtype=dtype,
+            )
 
-            # print(len(gc.get_referrers(model._modules[name])))
-            # # print("asdf")
-            # print(len(gc.get_referrers(model._modules[name].weight)))
-            # # print("asdf2")
-            # print(len(gc.get_referrers(model._modules[name].weight_scale_inv)))
+            #new_linear.weight.data = _dequantize_weight_blockwise(
+            new_linear.weight.data = _dequantize_weight_blockwise_broadcast(
+                weight.data.to(device),
+                weight_scale_inv.data.to(device)
+            ).to(module_device)
 
-            model._modules[name].__del__ = all_your_delete_are_belong_to_us
-            type(model._modules[name]).__del__ = all_your_delete_are_belong_to_us
-
-            delattr(model._modules[name], "weight")
-            #delattr(model._modules[name], "weight_scale_inv")
-            delattr(model._modules[name], "bias")
-            #print(sys.getrefcount(model._modules[name]))
-            #breakpoint()
-            #assert sys.getrefcount(model._modules[name]) == 1
-            delattr(model, name)
-            assert name not in model._modules
-            #sys.getrefcount
-            #assert not hasattr(model, name)
-            #assert model._modules.get(name) is None
-            #assert gc.isenabled()
-            #gc.collect()
-
-            # weight = model._modules[name].weight
-            # weight_scale_inv = model._modules[name].weight_scale_inv
-
-
-            # new_linear = nn.Linear(
-            #     in_features,
-            #     out_features,
-            #     device="cpu",
-            #     #bias=model._modules[name].bias is not None,
-            #     #device=model._modules[name].weight_scale_inv.device,
-            #     #dtype=model._modules[name].weight_scale_inv.dtype,
-            # )
-            # model.register_module(name, new_linear)
-
-            # import time
-            # time.sleep(0.1)
-            # gc.collect(0)
-            # gc.collect(1)
-            # gc.collect(2)
-
-            #delattr(model._modules[name].weight, "data")
-            #delattr(model._modules[name].weight_scale_inv, "data")
-
-            #model._modules[name].weight.data = _dequantize_weight_blockwise(
-            # model._modules[name].weight.data = _dequantize_weight_blockwise_broadcast(
-            #     module.weight.data.to(device),
-            #     module.weight_scale_inv.data.to(device)
-            # ).to(original_device)
+            model._modules[name] = new_linear
 
             if progress is not None:
                 progress.update(1)
@@ -572,70 +515,20 @@ def _dequantize_fp8_finegrained(
         else:
             _dequantize_fp8_finegrained(
                 model._modules[name],
-                current_key_name=current_key_name,
                 device=device,
+                dtype=dtype,
                 progress=progress,
             )
-        # Remove the last key for recursion
-        #current_key_name.pop(-1)
-
-
-def just_let_me_delete(model: torch.nn.Module, progress):
-    for module in model.modules():
-        for child_name in list(module._modules.keys()):
-            if isinstance(module._modules[child_name], FP8Linear):
-                ## TODO: patch kaiming to speed up
-                #module._modules[child_name] = torch.nn.Linear(1_000, 1_000)
-                # new_linear = nn.Linear(
-                #     module._modules[child_name].in_features,
-                #     module._modules[child_name].out_features,
-                #     device="cpu",
-                #     #bias=model._modules[name].bias is not None,
-                #     #device=model._modules[name].weight_scale_inv.device,
-                #     #dtype=model._modules[name].weight_scale_inv.dtype,
-                # )
-                del module._modules[child_name]
-                import time
-                time.sleep(0.01)
-                # module._modules[child_name] = new_linear
-                progress.update(1)
-
-"""
-def just_let_me_delete(model: torch.nn.Module, progress):
-    for module in model.modules():
-        for child_name in list(module._modules.keys()):
-            if isinstance(module._modules[child_name], FP8Linear):
-                in_features = module._modules[child_name].in_features
-                out_features = module._modules[child_name].out_features
-                new_linear = nn.Linear(
-                    in_features,
-                    out_features,
-                    bias=module._modules[child_name].bias is not None,
-                    device=module._modules[child_name].weight_scale_inv.device,
-                    dtype=module._modules[child_name].weight_scale_inv.dtype,
-                )
-                new_linear.weight.data = _dequantize_weight_blockwise_broadcast(
-                    module._modules[child_name].weight.data,
-                    module._modules[child_name].weight_scale_inv.data,
-                )
-                del module._modules[child_name]
-                module._modules[child_name] = new_linear
-                progress.update(1)
-"""
-
 
 @torch.no_grad()
 def dequantize_fp8_finegrained(model: nn.Module, current_key_name: Optional[List[str]] = None) -> nn.Module:
-    # num_dequantizable = 0
-    # for module in model.modules():
-    #     if isinstance(module, FP8Linear):
-    #         num_dequantizable += 1
-    num_dequantizable = 100000
+    num_dequantizable = 0
+    for module in model.modules():
+        if isinstance(module, FP8Linear):
+            num_dequantizable += 1
 
-    progress = tqdm.tqdm(desc="Dequantizing modules")
-    breakpoint()
-    just_let_me_delete(model, progress)
+    progress = tqdm.tqdm(desc="Dequantizing modules", total=num_dequantizable)
 
-    #return _dequantize_fp8_finegrained(model, [], device="cpu", progress=progress)
+    return _dequantize_fp8_finegrained(model, device="cpu", dtype=torch.bfloat16, progress=progress)
 
 
