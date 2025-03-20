@@ -202,7 +202,7 @@ class FineGrainedFP8HfQuantizer(HfQuantizer):
     def _dequantize(self, model: "PreTrainedModel") -> "PreTrainedModel":
         from ..integrations.finegrained_fp8 import dequantize_fp8_finegrained
 
-        model = dequantize_fp8_finegrained(model)
+        dequantize_fp8_finegrained(model)
         self._is_trainable = True
         return model
 
