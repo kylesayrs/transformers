@@ -445,6 +445,29 @@ def _dequantize_weight_blockwise(weight: torch.Tensor, weight_scale_inv: torch.T
 
     return weight
 
+
+def _dequantize_weight_blockwise_broadcast(weight: torch.Tensor, weight_scale_inv: torch.Tensor) -> torch.Tensor:
+    """Inplace """
+    dq_dtype = weight_scale_inv.dtype
+    weight = weight.to(dtype=dq_dtype)
+
+    scale_sizes = weight_scale_inv.size(0), weight_scale_inv.size(1)
+    block_sizes = (
+        int_ceil(weight.size(0), weight_scale_inv.size(0)),
+        int_ceil(weight.size(1), weight_scale_inv.size(1)))
+    
+    pad = (0, scale_sizes[1] * block_sizes[1] - weight.size(1), 0, scale_sizes[0] * block_sizes[0] - weight.size(0))
+    weight = torch.nn.functional.pad(weight, pad)
+
+    # (scale[0], num_block[0], scale[1], num_block[1])
+    weight_view = weight.view(scale_sizes[0], block_sizes[0], scale_sizes[1], block_sizes[1])
+    # (scale[0], scale[1], num_block[0], num_block[1])
+    weight_view = weight_view.transpose(1, 2)
+
+    weight_view *= weight_scale_inv[:, :, None, None]
+
+    return weight
+
 import tqdm
 def _dequantize_fp8_finegrained(
     model: nn.Module,
@@ -475,8 +498,10 @@ def _dequantize_fp8_finegrained(
                 dtype=module.weight_scale_inv.dtype,
             )
 
+            print(current_key_name)
             original_device = module.weight.device
-            model._modules[name].weight.data = _dequantize_weight_blockwise(
+            #model._modules[name].weight.data = _dequantize_weight_blockwise(
+            model._modules[name].weight.data = _dequantize_weight_blockwise_broadcast(
                 module.weight.data.to(device),
                 module.weight_scale_inv.data.to(device)
             ).to(original_device)
