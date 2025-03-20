@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from packaging import version
 
 from ..utils import is_accelerate_available, is_torch_available, logging
+from ..utils.quantization_config import FineGrainedFP8Config
 from .base import HfQuantizer
 from .quantizers_utils import get_module_from_name
 
@@ -27,9 +28,10 @@ class FineGrainedFP8HfQuantizer(HfQuantizer):
     requires_calibration = False
     required_packages = ["accelerate"]
 
-    def __init__(self, quantization_config, **kwargs):
+    def __init__(self, quantization_config: FineGrainedFP8Config, **kwargs):
         super().__init__(quantization_config, **kwargs)
         self.quantization_config = quantization_config
+        self._is_trainable = False
 
     def validate_environment(self, *args, **kwargs):
         if not is_torch_available() or version.parse(importlib.metadata.version("torch")) < version.parse("2.1.0"):
@@ -53,8 +55,8 @@ class FineGrainedFP8HfQuantizer(HfQuantizer):
         compute_capability = torch.cuda.get_device_capability()
         major, minor = compute_capability
         if major < 9:
-            raise ValueError(
-                "FP8 quantized models is only supported on GPUs with compute capability >= 9.0 (e.g H100)"
+            logger.warning_once(
+                "FP8 quantized models is only supported on GPUs with compute capability >= 9.0 (e.g H100). Please call model.dequantize() before running"
             )
 
         device_map = kwargs.get("device_map", None)
@@ -69,10 +71,10 @@ class FineGrainedFP8HfQuantizer(HfQuantizer):
                 and isinstance(device_map, dict)
                 and ("cpu" in device_map.values() or "disk" in device_map.values())
             ):
-                raise ValueError(
+                logger.warning_once(
                     "You are attempting to load an FP8 model with a device_map that contains a cpu/disk device."
                     "This is not supported when the model is quantized on the fly. "
-                    "Please use a quantized checkpoint or remove the cpu/disk device from the device_map."
+                    "Please use a dequantized checkpoint, call model.dequantize() before running, or remove the cpu/disk device from the device_map."
                 )
 
     def update_torch_dtype(self, torch_dtype: "torch.dtype") -> "torch.dtype":
@@ -197,9 +199,16 @@ class FineGrainedFP8HfQuantizer(HfQuantizer):
                         not_missing_keys.append(missing)
         return [k for k in missing_keys if k not in not_missing_keys]
 
+    def _dequantize(self, model: "PreTrainedModel") -> "PreTrainedModel":
+        from ..integrations.finegrained_fp8 import dequantize_fp8_finegrained
+
+        model = dequantize_fp8_finegrained(model)
+        self._is_trainable = True
+        return model
+
     def is_serializable(self, safe_serialization=None):
         return True
 
     @property
     def is_trainable(self) -> bool:
-        return False
+        return self._is_trainable

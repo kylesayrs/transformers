@@ -13,9 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from ..utils import is_accelerate_available, is_torch_available, logging
+
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedModel
+
+    from ..utils.quantization_config import FineGrainedFP8Config
 
 
 if is_torch_available():
@@ -349,14 +355,17 @@ class FP8Linear(nn.Module):
                 output = output + self.bias
             return output.to(dtype=input.dtype)
 
+    def extra_repr(self) -> str:
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
+
 
 def _replace_with_fp8_linear(
-    model,
-    modules_to_not_convert=None,
-    current_key_name=None,
-    quantization_config=None,
-    has_been_replaced=False,
-):
+    model: nn.Module,
+    modules_to_not_convert: Optional[List] = None,
+    current_key_name: Optional[List[str]] = None,
+    quantization_config: "FineGrainedFP8Config" = None,
+    has_been_replaced: bool = False,
+) -> Tuple[nn.Module, bool]:
     """Replace Linear layers with FP8Linear."""
     if current_key_name is None:
         current_key_name = []
@@ -394,10 +403,10 @@ def _replace_with_fp8_linear(
 
 
 def replace_with_fp8_linear(
-    model,
-    modules_to_not_convert=None,
-    quantization_config=None,
-):
+    model: "PreTrainedModel",
+    modules_to_not_convert: Optional[List] = None,
+    quantization_config: "FineGrainedFP8Config" = None,
+) -> "PreTrainedModel":
     """Helper function to replace model layers with FP8 versions."""
     modules_to_not_convert = ["lm_head"] if modules_to_not_convert is None else modules_to_not_convert
 
@@ -418,3 +427,85 @@ def replace_with_fp8_linear(
         )
 
     return model
+
+def int_ceil(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+def _dequantize_weight_blockwise(weight: torch.Tensor, weight_scale_inv: torch.Tensor) -> torch.Tensor:
+    dq_dtype = weight_scale_inv.dtype
+    block_sizes = (
+        int_ceil(weight.size(0), weight_scale_inv.size(0)),
+        int_ceil(weight.size(1), weight_scale_inv.size(1)))
+    
+    weight_scale_inv = torch.repeat_interleave(weight_scale_inv, repeats=block_sizes[0], dim=0)  # Expand rows
+    weight_scale_inv = torch.repeat_interleave(weight_scale_inv, repeats=block_sizes[1], dim=1)  # Expand columns
+
+    weight = weight.to(dtype=dq_dtype)
+    weight *= weight_scale_inv[:weight.size(0), :weight.size(1)]
+
+    return weight
+
+import tqdm
+def _dequantize_fp8_finegrained(
+    model: nn.Module,
+    current_key_name: List[str],
+    device: torch.device,
+    progress: Optional[tqdm.tqdm] = None
+) -> nn.Module:
+    """
+    Dequantizes the FP8 layers in the given model/module by replacing them with standard torch.nn.Linear layers
+    Args:
+        model (torch.nn.Module): The module containing FP8Linear layers to be dequantized.
+        current_key_name (list, optional): A list to keep track of the current module names during recursion. Defaults to None.
+    Returns:
+        torch.nn.Module: The module with FP8Linear layers replaced by torch.nn.Linear layers
+    """
+    for name, module in model.named_children():
+        current_key_name.append(name)
+
+        if isinstance(module, FP8Linear):
+            in_features = module.in_features
+            out_features = module.out_features
+
+            model._modules[name] = nn.Linear(
+                in_features,
+                out_features,
+                bias=module.bias is not None,
+                device=module.weight_scale_inv.device,
+                dtype=module.weight_scale_inv.dtype,
+            )
+
+            original_device = module.weight.device
+            model._modules[name].weight.data = _dequantize_weight_blockwise(
+                module.weight.data.to(device),
+                module.weight_scale_inv.data.to(device)
+            ).to(original_device)
+            #model._modules[name].weight.data = _dequantize_weight_blockwise_gpu(module)
+
+            #model._modules[name].weight.data = model._modules[name].weight @ module.weight_scale_inv
+
+            if progress is not None:
+                progress.update(1)
+
+        if len(list(module.children())) > 0:
+            _ = _dequantize_fp8_finegrained(
+                module,
+                current_key_name=current_key_name,
+                device=device,
+                progress=progress,
+            )
+        # Remove the last key for recursion
+        current_key_name.pop(-1)
+    return model
+
+
+@torch.no_grad()
+def dequantize_fp8_finegrained(model: nn.Module, current_key_name: Optional[List[str]] = None) -> nn.Module:
+    num_dequantizable = 0
+    for module in model.modules():
+        if isinstance(module, FP8Linear):
+            num_dequantizable += 1
+
+    progress = tqdm.tqdm(desc="Dequantizing modules", total=num_dequantizable)
+
+    return _dequantize_fp8_finegrained(model, [], device="cuda", progress=progress)
