@@ -382,16 +382,16 @@ def _replace_with_fp8_linear(
         if isinstance(module, nn.Linear) and name not in (modules_to_not_convert or []):
             current_key_name_str = ".".join(current_key_name)
             if not any(key in current_key_name_str for key in (modules_to_not_convert or [])):
-                #with init_empty_weights():
-                model._modules[name] = FP8Linear(
-                    in_features=module.in_features,
-                    out_features=module.out_features,
-                    bias=module.bias is not None,
-                    device=module.weight.device,
-                    dtype=module.weight.dtype,
-                    activation_scheme=quantization_config.activation_scheme,
-                    block_size=quantization_config.weight_block_size,
-                )
+                with init_empty_weights():
+                    model._modules[name] = FP8Linear(
+                        in_features=module.in_features,
+                        out_features=module.out_features,
+                        bias=module.bias is not None,
+                        device=module.weight.device,
+                        dtype=module.weight.dtype,
+                        activation_scheme=quantization_config.activation_scheme,
+                        block_size=quantization_config.weight_block_size,
+                    )
                 has_been_replaced = True
 
         if len(list(module.children())) > 0:
@@ -420,12 +420,11 @@ def replace_with_fp8_linear(
         modules_to_not_convert.extend(quantization_config.modules_to_not_convert)
     modules_to_not_convert = list(set(modules_to_not_convert))
 
-    # model, has_been_replaced = _replace_with_fp8_linear(
-    #     model,
-    #     modules_to_not_convert=modules_to_not_convert,
-    #     quantization_config=quantization_config,
-    # )
-    has_been_replaced = False
+    model, has_been_replaced = _replace_with_fp8_linear(
+        model,
+        modules_to_not_convert=modules_to_not_convert,
+        quantization_config=quantization_config,
+    )
 
     if not has_been_replaced:
         logger.warning(
@@ -584,9 +583,21 @@ def _dequantize_fp8_finegrained(
 def just_let_me_delete(model: torch.nn.Module, progress):
     for module in model.modules():
         for child_name in list(module._modules.keys()):
-            if isinstance(module._modules[child_name], nn.Linear):
+            if isinstance(module._modules[child_name], FP8Linear):
+                ## TODO: patch kaiming to speed up
+                #module._modules[child_name] = torch.nn.Linear(1_000, 1_000)
+                # new_linear = nn.Linear(
+                #     module._modules[child_name].in_features,
+                #     module._modules[child_name].out_features,
+                #     device="cpu",
+                #     #bias=model._modules[name].bias is not None,
+                #     #device=model._modules[name].weight_scale_inv.device,
+                #     #dtype=model._modules[name].weight_scale_inv.dtype,
+                # )
                 del module._modules[child_name]
-                module._modules[child_name] = torch.nn.Linear(1_000, 1_000)
+                import time
+                time.sleep(0.01)
+                # module._modules[child_name] = new_linear
                 progress.update(1)
 
 """
@@ -622,6 +633,7 @@ def dequantize_fp8_finegrained(model: nn.Module, current_key_name: Optional[List
     num_dequantizable = 100000
 
     progress = tqdm.tqdm(desc="Dequantizing modules")
+    breakpoint()
     just_let_me_delete(model, progress)
 
     #return _dequantize_fp8_finegrained(model, [], device="cpu", progress=progress)
